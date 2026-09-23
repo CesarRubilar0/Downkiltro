@@ -1,0 +1,33 @@
+{
+  "expo": {
+    "name": "Downkiltro",
+    "slug": "downkiltro",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./store_assets/ic_launcher_playstore.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.downkiltro.app"
+    },
+    "android": {
+      "package": "com.downkiltro.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./store_assets/ic_launcher_playstore.png",
+        "backgroundColor": "#12121A"
+      },
+      "permissions": [
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "READ_MEDIA_VIDEO",
+        "READ_MEDIA_AUDIO",
+        "READ_EXTERNAL_STORAGE",
+        "WRITE_EXTERNAL_STORAGE"
+      ]
+    },
+    "plugins": [],
+    "web": {
+      "favicon": "./store_assets/ic_launcher_playstore.png"
+    }
+  }
+}
