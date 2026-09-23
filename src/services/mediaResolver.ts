@@ -172,10 +172,10 @@ async function resolveTwitter(url: string, format: DownloadFormat): Promise<Reso
 }
 
 /**
- * Extractor para Instagram Reels y Posts
+ * Extractor para Instagram Reels y Posts usando SSR / Bot crawler oficial
  */
 async function resolveInstagram(url: string, format: DownloadFormat): Promise<ResolvedMedia> {
-  // Extraer el shortcode del reel o post
+  // Extraer el shortcode del reel o post (/reel/XXXXX o /p/XXXXX)
   const shortcodeMatch = url.match(/(?:reel|reels|p)\/([a-zA-Z0-9_-]+)/i);
   if (!shortcodeMatch || !shortcodeMatch[1]) {
     throw new Error('No se encontró un código de Reel o publicación válido en el enlace de Instagram.');
@@ -184,75 +184,119 @@ async function resolveInstagram(url: string, format: DownloadFormat): Promise<Re
   const shortcode = shortcodeMatch[1];
   const isVideo = format === 'VIDEO_MP4';
 
-  // Intentar consultar resolvedor de Instagram
   try {
-    // Opción 1: Consulta a endpoint GraphQL de Instagram
-    const queryUrl = `https://www.instagram.com/p/${shortcode}/?__a=1&__d=dis`;
-    const response = await fetch(queryUrl, {
+    const targetUrl = `https://www.instagram.com/reel/${shortcode}/`;
+    const response = await fetch(targetUrl, {
       headers: {
         'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        Accept: 'application/json',
+          'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
       },
     });
 
     if (response.ok) {
-      const data = await response.json();
-      const item = data.graphql?.shortcode_media || data.items?.[0];
+      const html = await response.text();
 
-      if (item) {
-        const videoUrl = item.video_url || item.video_versions?.[0]?.url;
-        if (videoUrl) {
-          const caption =
-            item.edge_media_to_caption?.edges?.[0]?.node?.text ||
-            item.caption?.text ||
-            `Instagram_Reel_${shortcode.slice(0, 6)}`;
-          const cleanTitle = caption
-            .replace(/[^a-zA-Z0-9_\-áéíóúÁÉÍÓÚñÑ ]/g, '')
-            .trim()
-            .slice(0, 40) || `Instagram_${shortcode}`;
+      // 1. Extraer Título, Autor y Portada
+      let title = `Instagram_Reel_${shortcode}`;
+      let author = 'Instagram';
+      let cover: string | undefined = undefined;
 
-          return {
-            downloadUrl: videoUrl,
-            title: cleanTitle,
-            author: item.owner?.username || 'Instagram User',
-            format,
-            extension: isVideo ? 'mp4' : 'mp3',
-          };
-        }
+      const ogTitleMatch = html.match(/<meta\s+property="og:title"\s+content="([^"]+)"/i);
+      const ogDescMatch = html.match(/<meta\s+property="og:description"\s+content="([^"]+)"/i);
+      const twitterTitleMatch = html.match(/<meta\s+name="twitter:title"\s+content="([^"]+)"/i);
+      const ogImageMatch = html.match(/<meta\s+property="og:image"\s+content="([^"]+)"/i);
+
+      if (ogImageMatch && ogImageMatch[1]) {
+        cover = ogImageMatch[1].replace(/&amp;/g, '&');
       }
-    }
-  } catch {
-    // Si la llamada directa a Instagram falla (por protección de cookies), usar servicio de respaldo
-  }
 
-  // Opción 2: Servicio de respaldo para Instagram Reels
-  try {
-    const backupUrl = `https://api.threadsphotodownloader.com/instagram?url=${encodeURIComponent(url)}`;
-    const backupRes = await fetch(backupUrl, {
-      headers: { Accept: 'application/json' },
-    });
+      if (twitterTitleMatch && twitterTitleMatch[1]) {
+        const rawAuthor = twitterTitleMatch[1].split('•')[0].trim();
+        if (rawAuthor) author = rawAuthor.replace(/&#064;/g, '@');
+      }
 
-    if (backupRes.ok) {
-      const backupData = await backupRes.json();
-      const videoUrl = backupData.url || backupData.video_url || backupData.data?.[0]?.url;
+      if (ogTitleMatch && ogTitleMatch[1]) {
+        title = ogTitleMatch[1]
+          .replace(/&quot;/g, '')
+          .replace(/&#xbf;/g, '¿')
+          .replace(/&#xe9;/g, 'é')
+          .replace(/&#xed;/g, 'í')
+          .replace(/&#xfa;/g, 'ú')
+          .replace(/&#xf3;/g, 'ó')
+          .replace(/&#xe1;/g, 'á')
+          .replace(/[^a-zA-Z0-9_\-áéíóúÁÉÍÓÚñÑ ¿?!]/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 45);
+      } else if (ogDescMatch && ogDescMatch[1]) {
+        title = ogDescMatch[1].slice(0, 40);
+      }
 
-      if (videoUrl) {
+      // 2. Extraer URLs multimedia de CDN
+      const escapedMatches = html.match(/https?:\\\/\\\/[^"']+\.mp4[^"']*/gi) || [];
+      const directMatches = html.match(/https?:\/\/[^"']+\.mp4[^"']*/gi) || [];
+      const rawUrls = [...escapedMatches, ...directMatches];
+
+      const cleanUrls = rawUrls
+        .map((u) => {
+          let clean = u
+            .replace(/\\\//g, '/')
+            .replace(/\\u0026/g, '&')
+            .replace(/&amp;/g, '&')
+            .replace(/\\u00253D/gi, '=')
+            .replace(/\\u0025/gi, '%');
+          clean = clean.split('<')[0].split('\\u003C')[0].split('\\')[0];
+          return clean;
+        })
+        .filter((u) => u.startsWith('http') && u.includes('.mp4'));
+
+      if (cleanUrls.length > 0) {
+        let downloadUrl = '';
+
+        if (!isVideo) {
+          // Para audio: buscar stream de audio dedicado (m78 / heaac / audio en parámetros)
+          const audioUrl = cleanUrls.find((u) => {
+            if (u.includes('m78') || u.includes('audio') || u.includes('heaac')) return true;
+            const efgMatch = u.match(/efg=([a-zA-Z0-9_\-]+)/);
+            if (efgMatch && typeof atob !== 'undefined') {
+              try {
+                const dec = atob(efgMatch[1].replace(/-/g, '+').replace(/_/g, '/'));
+                if (dec.toLowerCase().includes('audio') || dec.toLowerCase().includes('heaac')) {
+                  return true;
+                }
+              } catch {}
+            }
+            return false;
+          });
+
+          // Si hay stream de audio dedicado, usarlo; de lo contrario, el video completo
+          downloadUrl = audioUrl || cleanUrls[0];
+        } else {
+          // Para video: buscar versión progresiva en 720p o alta definición
+          const progUrl = cleanUrls.find(
+            (u) => u.includes('progressive') || u.includes('720') || u.includes('m86')
+          );
+          downloadUrl = progUrl || cleanUrls[0];
+        }
+
         return {
-          downloadUrl: videoUrl,
-          title: `Instagram_Reel_${shortcode}`,
-          author: 'Instagram',
+          downloadUrl,
+          title: title || `Instagram_${shortcode}`,
+          author,
+          cover,
           format,
           extension: isVideo ? 'mp4' : 'mp3',
         };
       }
     }
   } catch {
-    // Continuar al aviso informativo
+    // Si la llamada directa falla por cualquier razón, continuar
   }
 
   throw new Error(
-    'No se pudo extraer el video de Instagram. Asegúrate de que el Reel sea de una cuenta pública y no tenga restricciones de edad.'
+    'No se pudo extraer el archivo de Instagram. Verifica que el Reel sea de una cuenta pública y no tenga restricciones de edad o privacidad.'
   );
 }
 
